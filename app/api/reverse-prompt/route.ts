@@ -6,8 +6,40 @@ import { parseGitHubRepoInput } from "@/lib/parse-github-repo";
 import { getSupabase } from "@/lib/supabase";
 
 const README_MAX_CHARS = 8000;
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const GOOGLE_AI_STUDIO_URL =
   "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+
+type LlmTarget =
+  | { provider: "openrouter"; url: string; apiKey: string; model: string }
+  | { provider: "google"; url: string; apiKey: string; model: string };
+
+function resolveLlmTarget(): LlmTarget | { error: string } {
+  const openRouterKey = process.env.OPENROUTER_API_KEY?.trim();
+  if (openRouterKey) {
+    return {
+      provider: "openrouter",
+      url: OPENROUTER_URL,
+      apiKey: openRouterKey,
+      model:
+        process.env.OPENROUTER_MODEL?.trim() || "google/gemini-2.5-pro",
+    };
+  }
+  const googleKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
+  if (googleKey) {
+    return {
+      provider: "google",
+      url: GOOGLE_AI_STUDIO_URL,
+      apiKey: googleKey,
+      model:
+        process.env.GOOGLE_AI_STUDIO_MODEL?.trim() || "gemini-2.5-pro",
+    };
+  }
+  return {
+    error:
+      "No LLM API key configured. Set OPENROUTER_API_KEY (recommended) or GOOGLE_GENERATIVE_AI_API_KEY in .env.local.",
+  };
+}
 
 const inFlight = new Map<string, Promise<{ prompt: string } | NextResponse>>();
 
@@ -52,6 +84,28 @@ function buildUserMessage(
 function cacheTtlHours(): number {
   const n = Number(process.env.CACHE_TTL_HOURS);
   return Number.isFinite(n) && n > 0 ? n : 24;
+}
+
+/** Maps to client 429 handling → “Browse the library” (same as GitHub/rate limits). */
+function isExhaustedCreditsOrQuotaMessage(msg: string): boolean {
+  const lower = msg.toLowerCase();
+  if (
+    lower.includes("requires more credits") ||
+    lower.includes("can only afford") ||
+    lower.includes("openrouter.ai/settings/credits") ||
+    (lower.includes("credit") && lower.includes("max_tokens"))
+  ) {
+    return true;
+  }
+  if (
+    lower.includes("resource exhausted") ||
+    lower.includes("quota exceeded") ||
+    lower.includes("exceeded your current quota") ||
+    lower.includes("billing has not been enabled")
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function extractMessage(data: unknown): string | null {
@@ -103,16 +157,10 @@ export async function POST(request: NextRequest) {
 
   const { owner, repo } = parsed;
 
-  const apiKey = process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim();
-  if (!apiKey) {
-    return NextResponse.json(
-      { error: "GOOGLE_GENERATIVE_AI_API_KEY is not configured." },
-      { status: 500 }
-    );
+  const llm = resolveLlmTarget();
+  if ("error" in llm) {
+    return NextResponse.json({ error: llm.error }, { status: 500 });
   }
-
-  const model =
-    process.env.GOOGLE_AI_STUDIO_MODEL?.trim() || "gemini-2.5-pro";
 
   const key = `${owner}/${repo}`;
   const existing = inFlight.get(key);
@@ -186,16 +234,24 @@ export async function POST(request: NextRequest) {
       tree.truncated
     );
 
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${llm.apiKey}`,
+      "Content-Type": "application/json",
+    };
+    if (llm.provider === "openrouter") {
+      const referer = process.env.OPENROUTER_HTTP_REFERER?.trim();
+      if (referer) headers["HTTP-Referer"] = referer;
+      const title = process.env.OPENROUTER_APP_TITLE?.trim();
+      if (title) headers["X-Title"] = title;
+    }
+
     let res: Response;
     try {
-      res = await fetch(GOOGLE_AI_STUDIO_URL, {
+      res = await fetch(llm.url, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
+        headers,
         body: JSON.stringify({
-          model,
+          model: llm.model,
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
             { role: "user", content: userContent },
@@ -203,8 +259,10 @@ export async function POST(request: NextRequest) {
         }),
       });
     } catch (e) {
+      const label =
+        llm.provider === "openrouter" ? "OpenRouter" : "Google AI Studio";
       const message =
-        e instanceof Error ? e.message : "Google AI Studio request failed";
+        e instanceof Error ? e.message : `${label} request failed`;
       return NextResponse.json(
         { error: `Generation failed: ${message}` },
         { status: 500 }
@@ -215,34 +273,42 @@ export async function POST(request: NextRequest) {
     try {
       data = await res.json();
     } catch {
+      const label =
+        llm.provider === "openrouter" ? "OpenRouter" : "Google AI Studio";
       return NextResponse.json(
-        { error: "Google AI Studio returned invalid JSON." },
+        { error: `${label} returned invalid JSON.` },
         { status: 502 }
       );
     }
 
     if (!res.ok) {
-      if (res.status === 429) {
-        return NextResponse.json(
-          { error: "rate_limited" },
-          { status: 429 }
-        );
-      }
-
       const errObj = data as { error?: { message?: string } };
+      const label =
+        llm.provider === "openrouter" ? "OpenRouter" : "Google AI Studio";
       const msg =
         errObj?.error?.message ??
-        `Google AI Studio error ${res.status}: ${JSON.stringify(data).slice(0, 300)}`;
+        `${label} error ${res.status}: ${JSON.stringify(data).slice(0, 300)}`;
+
+      if (
+        res.status === 429 ||
+        res.status === 402 ||
+        isExhaustedCreditsOrQuotaMessage(msg)
+      ) {
+        return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+      }
+
       const lower = msg.toLowerCase();
       const isAuth =
         res.status === 401 ||
         lower.includes("unauthorized") ||
         lower.includes("invalid api key");
+      const authHint =
+        llm.provider === "openrouter"
+          ? "OpenRouter authentication failed. Check OPENROUTER_API_KEY in .env.local."
+          : "Google AI Studio authentication failed. Check GOOGLE_GENERATIVE_AI_API_KEY in .env.local.";
       return NextResponse.json(
         {
-          error: isAuth
-            ? "Google AI Studio authentication failed. Check GOOGLE_GENERATIVE_AI_API_KEY in .env.local."
-            : `Generation failed: ${msg}`,
+          error: isAuth ? authHint : `Generation failed: ${msg}`,
         },
         {
           status: isAuth ? 401 : res.status >= 400 && res.status < 600 ? res.status : 502,
