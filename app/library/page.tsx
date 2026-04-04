@@ -1,3 +1,4 @@
+import { connection } from "next/server";
 import { getSupabase } from "@/lib/supabase";
 import { LibraryPage } from "@/components/library-page";
 
@@ -12,6 +13,7 @@ export const metadata = {
 const INITIAL_LIMIT = 24;
 
 export default async function LibraryRoute() {
+  await connection();
   const supabase = getSupabase();
 
   let initialData: {
@@ -20,13 +22,15 @@ export default async function LibraryRoute() {
     repo: string;
     prompt: string;
     cached_at: string;
+    views?: number;
   }[] = [];
   let initialTotal = 0;
 
   if (supabase) {
     const { data, count } = await supabase
       .from("prompt_cache")
-      .select("id, owner, repo, prompt, cached_at", { count: "exact" })
+      .select("id, owner, repo, prompt, cached_at, views", { count: "exact" })
+      .order("views", { ascending: false })
       .order("cached_at", { ascending: false })
       .range(0, INITIAL_LIMIT - 1);
 

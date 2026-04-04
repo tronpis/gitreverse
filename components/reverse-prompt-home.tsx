@@ -2,15 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { HOME_EXAMPLES } from "@/lib/home-example-repos";
 import { parseGitHubRepoInput } from "@/lib/parse-github-repo";
-
-const EXAMPLES = [
-  { label: "Next.js", url: "https://github.com/vercel/next.js" },
-  { label: "Openclaw", url: "https://github.com/openclaw/openclaw" },
-  { label: "React", url: "https://github.com/facebook/react" },
-  { label: "Supabase", url: "https://github.com/supabase/supabase" },
-  { label: "Linux", url: "https://github.com/torvalds/linux" },
-] as const;
 
 type ReversePromptHomeProps = {
   initialRepoInput?: string;
@@ -303,7 +296,7 @@ export function ReversePromptHome({
                 <span className="w-full text-sm text-zinc-600">
                   Try example repos:
                 </span>
-                {EXAMPLES.map(({ label, url }) => (
+                {HOME_EXAMPLES.map(({ label, url }) => (
                   <div key={url} className="group relative">
                     <div className="absolute inset-0 translate-x-0.5 translate-y-0.5 rounded bg-zinc-900" />
                     <button
