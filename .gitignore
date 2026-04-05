@@ -140,7 +140,8 @@ config.local
 # TypeScript
 *.tsbuildinfo
 dist/
-lib/
+lib/**/*.js
+lib/**/*.d.ts
 node_modules/
 
 # Compiled JavaScript
