@@ -1,6 +1,7 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    // Relax unused-variable checks to avoid false positives in test callbacks and mocks.
     "noUnusedLocals": false,
     "noUnusedParameters": false
   }
